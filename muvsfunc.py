@@ -5789,14 +5789,15 @@ class rescale:
 
     """
 
-    def _get_descale_args(W: int, H: int, width: Union[float, int], height: Union[float, int], base_height: int = None):
+    def _get_descale_args(W: int, H: int, width: Union[float, int], height: Union[float, int], base_height: int = None, base_width: int = None):
         if base_height is None:
             width, height = round(width), round(height)
             src_width, src_height = width, height
             width, height = width, height
             src_left, src_top = 0, 0
         else:
-            base_width = round(W / H * base_height) if base_height % 2 == 1 else round(W / H * base_height / 2) * 2
+            if base_width is None:
+                base_width = round(W / H * base_height) if base_height % 2 == 1 else round(W / H * base_height / 2) * 2
             src_width = width
             src_height = height
             width = base_width - 2 * int((base_width - width) / 2)
@@ -5834,20 +5835,26 @@ class rescale:
             self.name = f"{kernel}{bc_name}{taps_name}"
             self.descale_args = {}
 
-        def __call__(self, clip: vs.VideoNode, src_height: Union[int, float], upscaler: Optional[Callable] = None) -> Any:
+        def __call__(self, clip: vs.VideoNode, src_height: Union[int, float], src_width: Optional[Union[int, float]] = None, upscaler: Optional[Callable] = None) -> Any:
             base_height = clip.height if isinstance(src_height, float) else None
-            return self.rescale(clip, src_height, base_height, upscaler)
+            return self.rescale(clip, src_height, base_height, src_width, None, upscaler)
 
-        def rescale(self, clip: vs.VideoNode, src_height: Union[int, float], base_height: Optional[int] = None, upscaler: Optional[Callable] = None) -> vs.VideoNode:
+        def rescale(self, clip: vs.VideoNode, src_height: Union[int, float], base_height: Optional[int] = None, src_width: Optional[Union[int, float]] = None,
+            base_width: Optional[int] = None, upscaler: Optional[Callable] = None) -> vs.VideoNode:
             W, H = clip.width, clip.height
-            src_width = W / H * src_height
-            descaled = self.descale(clip, src_width, src_height, base_height)
+            src_width = W / H * src_height if src_width is None else src_width
+            descaled = self.descale(clip, src_width, src_height, base_height, base_width)
             rescaled = self.upscale(descaled, W, H, upscaler)
             return rescaled
 
-        def descale(self, clip: vs.VideoNode, width: Union[int, float], height: Union[int, float], base_height: int = None):
+        def descale(self, clip: vs.VideoNode, width: Union[int, float] = None, height: Union[int, float] = None, base_height: int = None, base_width: Optional[int] = None):
+            
             W, H = clip.width, clip.height
-            self.descale_args = rescale._get_descale_args(W, H, width, height, base_height)
+            if width is None and height is not None:
+                width = W / H * height
+            elif height is None and width is not None:
+                height = H / W * width
+            self.descale_args = rescale._get_descale_args(W, H, width, height, base_height, base_width)
             kwargs = self.descale_args.copy()
             return core.descale.Descale(clip, kernel=self.kernel, taps=self.taps, b=self.b, c=self.c, **kwargs)
 
@@ -5892,6 +5899,7 @@ class rescale:
 
 def getnative(clip: vs.VideoNode, rescalers: Union[rescale.Rescaler, List[rescale.Rescaler]] = [rescale.Bicubic(0, 0.5)],
     src_heights: Union[int, float, Sequence[int], Sequence[float]] = tuple(range(500, 1001)), base_height: int = None,
+    src_width: Optional[Union[int, float]] = None, base_width: Optional[int] = None,
     crop_size: int = 5, rt_eval: bool = True, dark: bool = True, ex_thr: float = 0.015) -> vs.VideoNode:
     """Find the native resolution(s) of upscaled material (mostly anime)
 
@@ -5918,6 +5926,12 @@ def getnative(clip: vs.VideoNode, rescalers: Union[rescale.Rescaler, List[rescal
                 muf.arange(start[, stop, step]) might help you to construct such a sequence.
 
         base_height: (int) The real integer height before cropping. If not None, fractional resolution will be evaluated.
+            Default is None.
+        
+        src_width: (int|float) Specify a src_width. If not None, src_width will be assigned as a fixed value and won't change with src_height.
+            Default is None.
+
+        base_width: (int) The real integer width before cropping. Only used when base_height is set.
             Default is None.
 
         crop_size: (int) Range of pixels around the border to be excluded in calculation.
@@ -5951,7 +5965,25 @@ def getnative(clip: vs.VideoNode, rescalers: Union[rescale.Rescaler, List[rescal
 
             # evaluate 800.0, 800.1, 800.2, ..., 899.8, 899.9 as source heights with bicubic(b=1/3, c=1/3) as kernel
             # base_height here must be a interger larger than any of src_heights
-            res = muf.getnative(clip, rescalers=muf.rescale.Bicubic(), src_heights=muf.arange(800, 900, 0.1), base_height=900)
+            res = muf.getnative(clip, rescalers=muf.rescale.Bicubic(1/3, 1/3), src_heights=muf.arange(800, 900, 0.1), base_height=900)
+            res.set_output()
+        
+        Compare between different fractional source widths at a fixed source height.
+            clip = src[1000]  # to get a single frame clip
+
+            # evaluate 1200.0, 1200.1, 1200.2, ..., 1399.8, 1399.9 as source widths and 1080 as source height with bicubic(b=1/3, c=1/3) as kernel
+            # we use std.Transpose() to do the trick
+            # base_height here must be a interger larger than any of src_heights
+            res = muf.getnative(clip.std.Transpose(), rescalers=muf.rescale.Bicubic(1/3, 1/3), src_heights=muf.arange(1200, 1400, 0.1), base_height=1927, src_width=1080)
+            res.set_output()
+        
+        Compare different fractional source heights at a fixed source width while specifying both base height and base width.
+            clip = src[1000]  # to get a single frame clip
+
+            # evaluate 700.0, 700.1, 700.2, ..., 799.8, 799.9 as source heights and 1279.1 as source width with bicubic(b=1/3, c=1/3) as kernel
+            # base_height here must be a interger larger than any of src_heights
+            # base_width here must be a interger larger than src_width
+            res = muf.getnative(clip, rescalers=muf.rescale.Bicubic(1/3, 1/3), src_heights=muf.arange(700, 800, 0.1), base_height=1927, src_width=1279.1, base_width=1927)
             res.set_output()
 
         Compare between different descale kernels:
@@ -6011,7 +6043,10 @@ def getnative(clip: vs.VideoNode, rescalers: Union[rescale.Rescaler, List[rescal
         src_heights = tuple(src_heights)
     if base_height is not None:
         assert base_height > max(src_heights)
-
+    if base_width is not None:
+        assert base_width > max(src_heights) * clip.width / clip.height
+        if src_width is not None:
+            assert base_width > src_width
     if clip.num_frames > 1:
         mode = Mode.MULTI_FRAME
         assert len(src_heights) == 1 and len(rescalers) == 1, "1 src_height and 1 rescaler should be passed for verify mode."
@@ -6128,22 +6163,22 @@ def getnative(clip: vs.VideoNode, rescalers: Union[rescale.Rescaler, List[rescal
     if mode == Mode.MULTI_FRAME:
         src_height = src_heights[0]
         rescaler = rescalers[0]
-        rescaled = rescaler.rescale(clip, src_height, base_height)
+        rescaled = rescaler.rescale(clip, src_height, base_height, src_width, base_width)
     elif mode == Mode.MULTI_HEIGHT:
         rescaler = rescalers[0]
         if rt_eval:
             clip = core.std.Loop(clip, len(src_heights))
-            rescaled = core.std.FrameEval(clip, lambda n, clip=clip: rescaler.rescale(clip, src_heights[n], base_height))  # type: ignore
+            rescaled = core.std.FrameEval(clip, lambda n, clip=clip: rescaler.rescale(clip, src_heights[n], base_height, src_width, base_width))  # type: ignore
         else:
-            rescaled = core.std.Splice([rescaler.rescale(clip, src_height, base_height) for src_height in src_heights])  # type: ignore
+            rescaled = core.std.Splice([rescaler.rescale(clip, src_height, base_height, src_width, base_width) for src_height in src_heights])  # type: ignore
             clip = core.std.Loop(clip, len(src_heights))
     elif mode == Mode.MULTI_KERNEL:
         src_height = src_heights[0]
         if rt_eval:
             clip = core.std.Loop(clip, len(rescalers))
-            rescaled = core.std.FrameEval(clip, lambda n, clip=clip: rescalers[n].rescale(clip, src_height, base_height))  # type: ignore
+            rescaled = core.std.FrameEval(clip, lambda n, clip=clip: rescalers[n].rescale(clip, src_height, base_height, src_width, base_width))  # type: ignore
         else:
-            rescaled = core.std.Splice([rescaler.rescale(clip, src_height, base_height) for rescaler in rescalers])  # type: ignore
+            rescaled = core.std.Splice([rescaler.rescale(clip, src_height, base_height, src_width, base_width) for rescaler in rescalers])  # type: ignore
             clip = core.std.Loop(clip, len(rescalers))
 
     diff = core.std.Expr([clip, rescaled], [f"x y - abs dup {ex_thr} > swap 0 ?"])
